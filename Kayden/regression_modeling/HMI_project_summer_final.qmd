@@ -1,0 +1,614 @@
+---
+title: "HMI_project_summer"
+format: html
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+## In this analysis, we only use t0 and t1 score. So we will gonna find the effect of user engagement on the change of mental wellbeing score (t1=t0)
+
+## Basic setting
+
+```{r}
+# load necessary package
+#| message: false
+options(conflicts.policy = "depends.ok") 
+library(tidyverse)
+library(Matrix, exclude = c("expand", "pack", "unpack"))
+library(lme4)
+library(readr)
+library(car, exclude = c("recode", "some"))
+library(effectsize)
+library(kableExtra, exclude = ("group_rows"))
+
+theme_set(theme_classic()) 
+
+# setting for parallel processing
+cl <- parallel::makePSOCKcluster(parallel::detectCores(logical = FALSE))
+doParallel::registerDoParallel(cl)
+
+
+# machine learning setting
+devtools::source_url("https://github.com/jjcurtin/lab_support/blob/main/fun_ml.R?raw=true")
+tidymodels_conflictRules()
+
+# functions for EDA
+devtools::source_url("https://github.com/jjcurtin/lab_support/blob/main/fun_eda.R?raw=true")
+# functions for plotting
+devtools::source_url("https://github.com/jjcurtin/lab_support/blob/main/fun_plots.R?raw=true")
+
+devtools::source_url("https://github.com/jjcurtin/lab_support/blob/main/case_analysis.R?raw=true")
+
+path_data <- "dataset"
+```
+
+## load dataset
+
+```{r}
+data_demo <- read_csv(here::here(path_data, "demographics.csv"), show_col_types = FALSE) |> janitor::clean_names()
+
+data_stress <- read_csv(here::here(path_data, "perceived_stress_report_new_cleaned.csv"), show_col_types = FALSE) |> janitor::clean_names()
+
+data_t0 <- read_csv(here::here(path_data, "t0_all.csv"), show_col_types = FALSE) |> janitor::clean_names()
+
+data_t1 <- read_csv(here::here(path_data, "t1_all.csv"), show_col_types = FALSE) |> janitor::clean_names()
+
+data_t2 <- read_csv(here::here(path_data, "t2_all.csv"), show_col_types = FALSE) |> janitor::clean_names()
+
+# data for user history (meditation activity)
+data_history <- read_csv(here::here(path_data, "user_history_v2.csv"), show_col_types = FALSE) |> janitor::clean_names()
+```
+
+# EDA Cleaning
+
+merge 6 dataset into one
+
+demographic data
+
+```{r}
+data_demo_cln<-data_demo |> select(-c(completed_date, completed_time, missing_data_count, why_use_app, 
+                                  pre_meditation_habit_length, pre_meditation_session_length))
+
+data_demo_cln <-data_demo_cln |> mutate(across(where(is.character), factor))
+```
+
+data_history
+
+```{r}
+data_hist_cln <- data_history |> select(-c(participant_id, activity_id, app_build, app_version, path_uri, app_module, practice_posture, practice_speaker, practice_duration, activity_status))
+
+data_hist_cln <- data_hist_cln |> mutate(across(where(is.character), factor))
+```
+
+```{r}
+# change Unix time stamp
+data_hist_cln$completion_date<-as.POSIXct(data_hist_cln$completion_date, origin = "1970-01-01", tz="UTC")
+```
+
+## data_t0
+
+```{r}
+data_t0_cln<-data_t0 |> select(c(user_id, , completed_date, awareness_t0_m, insight_t0_m, connection_t0_m, purpose_t0_m))
+data_t0_cln$wellbeing_t0_m <- data_t0_cln$awareness_t0_m + data_t0_cln$insight_t0_m + data_t0_cln$connection_t0_m + data_t0_cln$purpose_t0_m
+data_t0_cln <- data_t0_cln |> rename(t0_completed_date = completed_date)
+```
+
+## data_t1
+
+```{r}
+data_t1_cln<-data_t1 |> select(c(user_id, completed_date, awareness_t1_m, insight_t1_m, connection_t1_m, purpose_t1_m))
+data_t1_cln$wellbeing_t1_m <- data_t1_cln$awareness_t1_m + data_t1_cln$insight_t1_m + data_t1_cln$connection_t1_m + data_t1_cln$purpose_t1_m
+data_t1_cln <- data_t1_cln |> rename(t1_completed_date = completed_date)
+
+```
+
+## data_t2
+
+```{r}
+data_t2_cln <- data_t2 |> select(c(user_id, completed_date, awareness_t2_m, insight_t2_m, connection_t2_m, purpose_t2_m))
+data_t2_cln$wellbeing_t2_m <- data_t2_cln$awareness_t2_m + data_t2_cln$insight_t2_m + data_t2_cln$connection_t2_m + data_t2_cln$purpose_t2_m
+data_t2_cln <- data_t2_cln |> rename(t2_completed_date = completed_date)
+```
+
+##data_stress
+
+```{r}
+data_stress_cln <- data_stress |> mutate(
+  control_irritations = case_match(control_irritations,
+                                   "Never" ~ 0,
+                                   "Almost Never" ~ 1,
+                                   "Sometimes" ~ 2,
+                                   "Fairly Often" ~ 3,
+                                   "Very Often" ~ 4),
+  angered_outside_control = case_match(angered_outside_control,
+                                       "Never" ~ 0,
+                                       "Almost Never" ~ 1,
+                                       "Sometimes" ~ 2,
+                                       "Fairly Often" ~ 3,
+                                       "Very Often" ~ 4),
+  upset_unexpected = case_match(upset_unexpected,
+                                "Never" ~ 0,
+                                "Almost Never" ~ 1,
+                                "Sometimes" ~ 2,
+                                "Fairly Often" ~ 3,
+                                "Very Often" ~ 4),
+  confidence_handle_problems = case_match(confidence_handle_problems, 
+                                "Never" ~ 4,
+                                "Almost Never" ~ 3,
+                                "Sometimes" ~ 2,
+                                "Fairly Often" ~ 1,
+                                "Very Often" ~ 0),
+  difficulties_not_overcome = case_match(difficulties_not_overcome, 
+                                "Never" ~ 0,
+                                "Almost Never" ~ 1,
+                                "Sometimes" ~ 2,
+                                "Fairly Often" ~ 3,
+                                "Very Often" ~ 4),
+  nervous_stressed = case_match(nervous_stressed, 
+                                "Never" ~ 0,
+                                "Almost Never" ~ 1,
+                                "Sometimes" ~ 2,
+                                "Fairly Often" ~ 3,
+                                "Very Often" ~ 4),
+  things_going_way = case_match(things_going_way, 
+                                "Never" ~ 0,
+                                "Almost Never" ~ 1,
+                                "Sometimes" ~ 2,
+                                "Fairly Often" ~ 3,
+                                "Very Often" ~ 4),
+  on_top_of_things = case_match(on_top_of_things, 
+                                "Never" ~ 4,
+                                "Almost Never" ~ 3,
+                                "Sometimes" ~ 2,
+                                "Fairly Often" ~ 1,
+                                "Very Often" ~ 0),
+  unable_to_control_important = case_match(unable_to_control_important, 
+                                "Never" ~ 0,
+                                "Almost Never" ~ 1,
+                                "Sometimes" ~ 2,
+                                "Fairly Often" ~ 3,
+                                "Very Often" ~ 4),
+  cannot_cope_with_tasks = case_match(cannot_cope_with_tasks, 
+                                "Never" ~ 0,
+                                "Almost Never" ~ 1,
+                                "Sometimes" ~ 2,
+                                "Fairly Often" ~ 3,
+                                "Very Often" ~ 4))
+```
+
+```{r}
+data_stress_cln<-data_stress_cln |> mutate(
+  stress_total = rowSums(across(control_irritations:cannot_cope_with_tasks)))
+
+data_stress_cln<-data_stress_cln |> select(c(user_id, stress_total))
+```
+
+## merge data_demo_cln, data_t0\~t2, data_stress_cln
+
+```{r}
+# inner join the table
+data_total <- left_join(x=data_stress_cln, y=data_demo_cln, by="user_id")
+data_total <- left_join(x=data_total, y=data_t0_cln, by= "user_id")
+data_total <- left_join(x=data_total, y=data_t1_cln, by= "user_id")
+data_total <- left_join(x=data_total, y=data_t2_cln, by= "user_id")
+```
+
+## remove rows with NA values in wellbeing_t0_m and wellbeing_t1_m variables.
+
+```{r}
+#data_total <- data_total |> filter(!is.na( wellbeing_t0_m) & !is.na(wellbeing_t1_m))
+```
+
+```{r}
+# drop the duplicated rows (if stress_total differs, keep the row with latest value.)
+data_total <- data_total[!duplicated(data_total), ]
+
+#data_total<-data_total |> group_by(user_id) |> 
+#  slice_max(order_by = stress_total, n=1, with_ties = FALSE) |> 
+#  ungroup()
+
+data_total<-data_total |> group_by(user_id) |> arrange(desc(t0_completed_date), desc(stress_total), by_group=TRUE) |> slice_head(n=1) |> ungroup()
+```
+
+
+## specify engagement as consistency, frequency(day), frequency(session),frequency(elapsed_time) strictness(linear curriculum)
+
+```{r}
+data_hist_cln<-data_hist_cln |> select(-x)
+```
+
+### filter user activities that were excuted between t0 and t2 survey.
+
+```{r}
+## add t0~t2 completed date to data_hist_cln
+data_hist_cln<-left_join(x=data_total |> select(user_id, t0_completed_date, t1_completed_date), y=data_hist_cln, by = "user_id")
+```
+
+```{r}
+# transform to date type
+data_hist_cln$t0_completed_date<-lubridate::mdy(data_hist_cln$t0_completed_date)
+data_hist_cln$t1_completed_date<-lubridate::mdy(data_hist_cln$t1_completed_date)
+```
+
+```{r}
+data_hist_cln$completion_date_only <- as.Date(data_hist_cln$completion_date)
+```
+
+Only screen activities between the t0 and t1 completion dates were considered.
+```{r}
+#omit user activities executed before t0 survey
+data_hist_cln<-data_hist_cln |> 
+  filter(completion_date >= t0_completed_date)
+
+# omit activities executed after t1 survey
+data_hist_cln<-data_hist_cln |> 
+  filter(completion_date <= t1_completed_date)
+```
+
+### identify and filter user activities with implausible elapsed time
+
+```{r}
+data_hist_cln |> summarise(mean_elapsed = mean(elapsed_time, na.rm = TRUE),
+                           max_elapsed = max(elapsed_time, na.rm = TRUE),
+                           min_elapsed = min(elapsed_time, na.rm = TRUE),
+                           sd_elapsed = sd(elapsed_time, na.rm = TRUE))
+
+# filter out activities with elapsed time less than 60s and more than 4000s
+data_hist_cln<-data_hist_cln |> filter(elapsed_time<=4000&elapsed_time>=60)
+plot_univariate(data_hist_cln, "elapsed_time")
+```
+
+# Figure out engagement features
+
+## user engagement predictors (frequency, usuage consistency, adherence to linear meditation track)
+
+### frequency1 (total days of usage)
+
+```{r}
+# used days
+user_usuage_days <- data_hist_cln |> 
+  group_by(user_id) |> 
+  summarise(days_used = n_distinct(completion_date_only)) |> 
+  ungroup()
+
+data_hist_cln<-data_hist_cln |> 
+  left_join(user_usuage_days, by="user_id")
+```
+
+### frequency2 (total elapsed time)
+
+```{r}
+# elapsed time
+elapsed_time<-data_hist_cln |> group_by(user_id) |> summarise(total_elapsed_time = sum(elapsed_time, na.rm=TRUE)) |> ungroup()
+
+data_hist_cln<-data_hist_cln |> 
+  left_join(elapsed_time, by='user_id')
+```
+
+### frequency3 (total session completed)
+
+```{r}
+# total session completed
+session_completed<-data_hist_cln |> group_by(user_id) |> summarise(total_session_completed = n()) |> ungroup()
+
+data_hist_cln<-data_hist_cln |> 
+  left_join(session_completed, by='user_id')
+```
+
+### frequency4 (the ratio of practice session to learn session)
+
+Change 'donate' in the task_type column to 'practice' or 'learn' based on context.
+
+```{r}
+# rename activity name == "Thoughts\\" to "Thoughts, Emotions, and the Breath" 
+data_hist_cln <- data_hist_cln |> 
+  mutate(activity_name = recode(activity_name, 
+                                "Thoughts\\" = "Thoughts, Emotions, and the Breath",
+                                "Unguided Practice" = "Unguided Practice Timer"
+                                ))
+
+# change donate to 'practice' or 'learn'
+data_hist_cln$task_type<-as.character(data_hist_cln$task_type)
+
+data_hist_cln <- data_hist_cln |>
+  group_by(activity_name) |>
+  mutate(task_type = case_when(
+    task_type == "donate" & any(task_type == "practice") ~ "practice",
+    task_type == "donate" & any(task_type == "learn") ~ "learn",
+    TRUE ~ task_type
+  )) |>
+  ungroup()
+```
+
+the number of completed session where task_type is 'practice'
+
+```{r}
+session_completed_prac<-data_hist_cln |> filter(task_type == 'practice') |> group_by(user_id) |> summarise(session_completed_prac = n())
+```
+
+the number of completed session where task_type is 'learn'
+
+```{r}
+session_completed_learn <- data_hist_cln |> filter(task_type == 'learn') |> 
+  group_by(user_id) |> summarise(session_completed_learn = n())
+```
+
+```{r}
+session_completed <- session_completed |> 
+  left_join(session_completed_prac, by = 'user_id') |> 
+  left_join(session_completed_learn, by = 'user_id')
+
+session_completed<-session_completed |> 
+  mutate(prac_learn_ratio = session_completed_prac / session_completed_learn)
+```
+
+merge the "prac_learn_ratio" column to the data_hist_cln
+
+```{r}
+data_hist_cln<-data_hist_cln |> 
+  left_join(session_completed |> select(c(user_id, prac_learn_ratio)), by = 'user_id')
+```
+
+### consistency1 (cv_daily_elapsed_time)
+
+how regularly the user engaged with the app
+
+:   we calculated the standard deviation of daily elapsed time across days.
+
+    ```{r}
+    # calculate daily elapsed time
+    daily_usuage <- data_hist_cln |> 
+      group_by(user_id, completion_date_only) |> 
+      summarise(daily_elapsed_time = sum(elapsed_time, na.rm=TRUE), .groups = "drop")
+
+    # calculate sd, mean
+    usage_sd <- daily_usuage |> 
+      group_by(user_id) |> 
+      summarise(std_daily_elapsed_time = sd(daily_elapsed_time, na.rm=TRUE),
+                mean_daily_elapsed_time = mean(daily_elapsed_time, na.rm=TRUE),
+                n_day = n())
+
+    # normalization (sd / mean) : coefficient of variation
+    usage_sd<-usage_sd |> mutate(cv_daily_elapsed_time = std_daily_elapsed_time / mean_daily_elapsed_time)
+    ```
+
+### consistency2 (cv of inter-session intervals)
+
+```{r}
+interval_by_user <- data_hist_cln |> 
+  arrange(user_id, completion_date) |> 
+  group_by(user_id) |> 
+  arrange(completion_date_only, .by_group =TRUE) |> 
+  mutate(interval = as.numeric(difftime(completion_date_only, lag(completion_date_only), units = "days"))) |> 
+  summarise(sd_interval = sd(interval, na.rm=TRUE),
+            mean_interval = mean(interval, na.rm=TRUE),
+            n_sessions = n(),
+            .groups = "drop")
+
+# normalization (sd / mean) : coefficient of variation
+interval_by_user <- interval_by_user |> 
+  mutate(cv_interval = sd_interval / mean_interval)
+```
+
+```{r}
+# merge usage_sd, interval_by_user into data_hist_cln
+data_hist_cln<-data_hist_cln |> left_join(usage_sd |> select(c(user_id, cv_daily_elapsed_time)), by = "user_id")
+data_hist_cln<-data_hist_cln |> left_join(interval_by_user |> select(c(user_id, cv_interval)), by = 'user_id')
+```
+
+### grouping the activity types following with meditation linear track.
+
+```{r}
+data_hist_cln <- data_hist_cln |>
+  mutate(activity_type = NA_character_)
+```
+
+```{r}
+data_hist_cln <- data_hist_cln |>
+  mutate(activity_type = case_when(
+    activity_name %in% c("A Tour of the Senses", "Training Attention", "Mindfulness of Sound", "Directing Attention", "Counting the Breath", "Focus", "Mindful Seeing", "Monitoring the Mind", "Feeling the Breath", "Transforming Distraction", "Mindfulness of Sensations", "Open Awareness", "From Doing to Being", "Relaxing with the Breath", "Relaxing the Mind") ~ "attention",
+    activity_name %in% c("Introducing Mindfulness", "Fully Present", "The Default Mode of Your Brain", "Listen with Presence", "The Benefits of Being Aware", "Drifting Away and Coming Back", "Stay Open", "Mindfulness and the Stress Response", "It's Just Experience", "Embrace Your Inner Demons", "Go with the Flow", "Calm and Grounded", "Two Forms of Calm", "The Calm Presence of Awareness", "Cool as Ice", "Drop into Calm", "Training Attention", "Attention Economy", "Inner Voice", "The Myth of Multitasking", "Countdown to Focus", "A Wandering Mind is an Unhappy Mind", "Background Check", "Relaxing into Awareness", "Creative Space", "Open Awareness", "Introducing Self-Awareness", "Observing Inner Experience", "Getting out of the River", "What Are Thoughts Made Of?", "The Third Option", "Automatic Thoughts", "Exploring Emotion", "Check the Weather", "The Push and Pull of Emotion", "The Power of Acceptance", "Home Base", "Transforming Distraction", "From Doing to Being", "Turning Enemies into Friends", "Letting Go", "Explore Your Inner Terrain", "Mind the Urge", "Disrupting Habits", "Unhooking Habits", "From React to Respond", "Everything is Meditation") ~ "awareness",
+    activity_name %in% c("Checking in with Yourself", "Clarity in Uncertain Times", "Change Your Mind, Change the World", "Compassion in Challenging Times") ~ "compassion_in_action",
+    activity_name %in% c("Self-Worth", "Noticing the Positive", "Seeing the Good in Ourselves", "Negativity Bias", "Feeling Appreciation", "Valuing Friends and Loved Ones", "What's Right?", "Appreciating Friends and Loved Ones", "Our Common Humanity", "Gratitude", "Valuing Strangers", "New Directions", "Appreciating Those We Don't Know", "A Mirror to the World", "Appreciation for Those We Find Challenging", "Be Kind to Yourself", "Kindness is Essential", "Feeling Kindness", "Innate Basic Goodness", "Sending Kindness", "Seeing Kindness in Others", "Friends Everywhere", "Receiving Kindness", "Kindness is Contagious", "Friends and Family", "Kindness Outside Our Circle", "Extending Kindness", "Transforming Difficult Relationships", "Transforming Aggression", "Kindness is Natural", "Compassion is Our Nature", "Compassion in Difficult Situations", "It's Always Here", "Sending Self-Compassion", "Your Natural Tendency to Care", "Rediscover Compassion", "Wishing Your Loved Ones Well", "Shift Perspective", "A Positive Wish for Loved Ones", "Compassion for Strangers", "Flip the Script", "Compassion in Challenging Relationships", "Courage to Heal", "Compassion for All Beings", "Survival of the Kindest", "Connection: The Second Pillar of Well-Being") ~ "connection",
+    activity_name %in% c("Calm in the Midst of Chaos", "Grateful Awareness in Difficult Times", "Commuting", "Envisioning Actions", "Exercising with Mindfulness", "Sports and Interconnection", "Reconnect to the World") ~ "daily_life",
+    activity_name %in% c("Happiness Is a Skill", "Introduction", "Taming the Monkey Mind", "Don’t Believe Your Thoughts", "Cultivate Attention", "See Through Thoughts and Emotions", "The Case Against Self-Criticism", "Wise Selfishness", "Care and Dignity", "Social Animals", "Grounded Compassion", "Compassion for Jerks", "Compassion for an Annoying Person", "'Oneness' Is More Than a Cliché", "Interconnected", "The Good News About Death", "The Hardest Part Is Remembering") ~ "dalai_lama",
+    activity_name %in% c("Intro to Sitting Meditation", "Train the Mind, Rewire the Brain", "Intro to Active Meditation", "The Skill of Mindfulness", "The Pull of Distraction", "The Skill of Attention", "The Art of Doing Less", "The Skill of Self-Awareness", "Appreciation", "Feeling Connected", "Kindness", "Widening the Circle", "Compassion", "Exploring the Self", "The Unexamined Life", "Exploring Change", "Looks Can Deceive", "Exploring Conditions", "This One Moment", "A Life Worth Living", "Core Values", "Be the Change", "Living Your Values", "Welcome to the Healthy Minds Program", "A Tour of the Senses", "Mindful Breathing", "Mindfulness of Sensations", "Intro to Active Meditation", "Compassion") ~ "foundation",
+    activity_name %in% c("Beyond the Labels", "Insight and Why It Matters", "Exploring Change in the Body", "Deconstructing Inner Experience", "The Stories We Tell Ourselves", "Flavors of Experience", "Uncharted Territory", "The Web of Experience", "Seeing the Full Picture", "Noticing the Subtle Details", "Virtual Reality", "A Wider Perspective", "Turning Inward", "Examining the Lens", "Likes and Dislikes", "Letting Go with Compassion", "The Self-Body Connection", "Boundaries of the Self", "Recreating the Self", "The Self-Improvement Trap", "Seeds of Appreciation", "Shifting Sands", "The Rich World of Emotion", "Invisible Forces", "Pleasure and Desire", "Thoughts Don't Define Us", "Resistance Fuels Suffering", "Only Thoughts", "Be Yourself", "Your Mind's Natural State", "Your Mind's Natural Habitat", "Growth Mindset", "Beliefs About Relationships", "All the World's a Stage", "The Roles We Play", "Question Your Assumptions", "The Self-Righteous Mind", "Groups That Define Us", "Hidden Messages", "Inquiring Into Ideology", "Innate Awareness", "Redefine Yourself", "Innate Compassion", "Transcending The Self", "Innate Wisdom") ~ "insight",
+    activity_name %in% c("Momentary Overwhelm", "Moment of Rest", "A Moment of Inspiration", "Feeling Stuck") ~ "micro_practices",
+    activity_name %in% c("Caring for the Brain", "Counting the Breath", "Dropping Anchor", "Open Awareness", "Healthy Habits: Inspiration", "Mindfulness of Sound", "Relaxing with the Breath", "Healthy Habits: Setting Intentions", "A Tour of the Senses", "Healthy Habits: Taking Action", "Mindful Seeing", "Feeling the Breath", "Healthy Habits: Repetition and Experience", "Mindfulness of Sensations", "Looking Within", "Mindful Breathing") ~ "mindfulness",
+    activity_name %in% c("Leave Your Mark", "Moments of Inspiration", "The Importance of Purpose", "The Power of Purpose", "A Central Life Aim", "Clarifying Your Values", "Your 100th Birthday", "Imagine the Possibilities", "One Act, Many Motivations", "Purpose in Relationships", "Pause for Purpose", "The Little Things", "Eyes on the Horizon", "Purpose in Daily Life", "Growing Through Adversity", "Keep Asking Why", "Under Pressure", "Guilty Pleasure vs. Fulfillment", "Core Values", "Role Models", "Applying Values to Life", "Our Most Important Relationship", "Build Yourself Up", "Don't Search for Meaning", "Deepening Relationships", "Walking the Talk", "Transforming Daily Routines", "Values in Difficult Times", "What Are You Feeding Your Mind?", "Transform Your Mind With Values", "A Life of Meaning", "The Experience of Meaning", "It's All About Perspective", "The World Needs You", "Values in Your Life", "Meaning in the Mundane", "The Meaning of Adversity", "Meaning Here and Now", "Choose Meaning", "Finding Meaning in Difficult Times", "The Art of Meaning", "Every Step Counts", "Sharing the Journey", "Changing the World", "Compassion") ~ "purpose",
+    activity_name %in% c("Healing Division", "Giving and Receiving Love", "Pride in Who We Are", "Healing Intergenerational Trauma", "A New Beginning", "Free To Be", "Compassion for Family Stress", "Appreciating Friends and Loved Ones", "Gratitude", "Flourishing Friendships", "Embracing Holiday Expectations", "Appreciation for Those We Find Challenging") ~ "relationships",
+    activity_name %in% c("Stepping Out of the River", "Strengthening Self-Awareness", "Mindfulness of Emotions", "The Self-Awareness Toolkit", "Thoughts, Emotions, and the Breath", "Weather Check", "Self-Regulation", "The Wandering Mind", "The Third Option", "Dealing with Stress", "Inner Balance", "Exploring Emotion", "Awareness: The First Pillar of Well-Being") ~ "self_awareness",
+    activity_name %in% c("Unguided Practice Timer") ~ "silence",
+    activity_name %in% c("Mindfulness for Sleep", "Fall Asleep with Awareness", "Wake Up with Awareness", "Body Scan for Sleep", "Calming the Breath for Sleep", "Calming the Mind for Sleep", "Preparing the Mind and Body for Sleep") ~ "sleeping",
+    activity_name %in% c("Sending Breath to Your Body", "Dealing with Election Anxiety", "Difficult Holiday Emotions", "Facing Financial Stress", "Gratitude for Your Body", "The Mind that Craves", "Calm in the Midst of Chaos", "Lean on Your Values", "A True Break", "Seeing the Good in Ourselves", "The Skill of Mindfulness", "Interdependence with Nature", "Working with Difficult Emotions during the Holidays", "Transforming Physical Pain") ~ "stress",
+    TRUE ~ activity_type))
+```
+
+### quantify the ordered progression
+
+first, make new table for calculate user adherence to linear tracks
+
+```{r}
+data_adherence <- data_hist_cln |> select(c(user_id, completion_date, elapsed_time, task_type, activity_type, app_part, app_series, activity_name))
+```
+
+assign activity_id to each unique activity name and make activity list for each user and activity_type
+
+```{r}
+#data_adherence <- data_adherence |> arrange(activity_type)
+#data_adherence$activity_id <- match(data_adherence$activity_name,
+                                  #unique(data_adherence$activity_name))
+
+user_activity_list <- data_adherence |> 
+  arrange(user_id, completion_date) |> 
+  group_by(user_id, activity_type) |> 
+  summarise(activity_list = list(activity_name), .groups = "drop")
+
+#data_adherence_test <- data_adherence |> select(activity_type, activity_name,activity_id) |> unique()
+```
+
+Generate a sequential list of activities for each meditation track.
+
+```{r}
+meditation_track <- tibble(
+  track_name = c("foundation",
+                 "awareness",
+                 "connection",
+                 "insight",
+                 "purpose",
+                 "attention",
+                 "self_awareness",
+                 "mindfulness",
+                 "daily_life",
+                 "sleeping",
+                 "micro_practices",
+                 "compassion_in_action",
+                 "silence",
+                 "relationships",
+                 "dalai_lama",
+                 "stress"),
+  track = list(
+    c("Welcome to the Healthy Minds Program", "Intro to Sitting Meditation", "Train the Mind, Rewire the Brain", "Intro to Active Meditation", "The Skill of Mindfulness", "The Pull of Distraction", "The Skill of Attention", "The Art of Doing Less", "The Skill of Self-Awareness", "Appreciation", "Feeling Connected", "Kindness", "Widening the Circle", "Compassion", "Exploring the Self", "The Unexamined Life", "Exploring Change", "Looks Can Deceive", "Exploring Conditions", "This One Moment", "A Life Worth Living", "Core Values", "Be the Change", "Living Your Values"),
+    c("The Default Mode of Your Brain", "Listen with Presence", "The Benefits of Being Aware", "Drifting Away and Coming Back", "Mindfulness and the Stress Response", "Embrace Your Inner Demons", "Go with the Flow", "Two Forms of Calm", "The Calm Presence of Awareness", "Cool as Ice", "Drop into Calm", "Training Attention", "Attention Economy", "Inner Voice", "The Myth of Multitasking", "Countdown to Focus", "A Wandering Mind is an Unhappy Mind", "Home Base", "Turning Enemies into Friends", "Transforming Distraction", "Letting Go", "From Doing to Being", "Relaxing into Awareness", "Creative Space", "Open Awareness", "Introducing Self-Awareness", "Getting out of the River", "The Third Option", "Automatic Thoughts", "Exploring Emotion", "Check the Weather", "The Push and Pull of Emotion", "The Power of Acceptance", "Explore Your Inner Terrain", "Disrupting Habits", "Unhooking Habits", "From React to Respond", "Everything is Meditation"),
+    c("Self-Worth", "Noticing the Positive", "Seeing the Good in Ourselves", "Negativity Bias", "Valuing Friends and Loved Ones", "Appreciating Friends and Loved Ones", "Our Common Humanity", "Gratitude", "Valuing Strangers", "New Directions", "A Mirror to the World", "Appreciation for Those We Find Challenging", "Be Kind to Yourself", "Kindness is Essential", "Feeling Kindness", "Innate Basic Goodness", "Sending Kindness", "Seeing Kindness in Others", "Friends Everywhere", "Receiving Kindness", "Kindness is Contagious", "Friends and Family", "Kindness Outside Our Circle", "Extending Kindness", "Transforming Difficult Relationships", "Transforming Aggression", "Kindness is Natural", "Compassion is Our Nature", "Survival of the Kindest", "Sending Self-Compassion", "Your Natural Tendency to Care", "Rediscover Compassion", "Wishing Your Loved Ones Well", "Shift Perspective", "A Positive Wish for Loved Ones", "Compassion for Strangers", "Flip the Script", "Compassion in Challenging Relationships", "Courage to Heal", "Compassion for All Beings"),
+    c("Beyond the Labels", "Insight and Why It Matters", "Exploring Change in the Body", "Uncharted Territory", "The Web of Experience", "Shifting Sands", "Seeing the Full Picture", "Noticing the Subtle Details", "Virtual Reality", "A Wider Perspective", "Turning Inward", "Examining the Lens", "Deconstructing Inner Experience", "The Rich World of Emotion", "Invisible Forces", "Flavors of Experience", "Pleasure and Desire", "Resistance Fuels Suffering", "Likes and Dislikes", "The Self-Body Connection", "Recreating the Self", "Only Thoughts", "Be Yourself", "Boundaries of the Self", "Seeds of Appreciation", "Letting Go with Compassion", "The Stories We Tell Ourselves", "Growth Mindset", "Beliefs About Relationships", "The Roles We Play", "Question Your Assumptions", "The Self-Righteous Mind", "Groups That Define Us", "Hidden Messages", "Inquiring Into Ideology", "Innate Awareness", "Redefine Yourself", "Innate Compassion", "Transcending The Self", "Innate Wisdom"),
+    c("Moments of Inspiration", "The Importance of Purpose", "The Power of Purpose", "A Central Life Aim", "Your 100th Birthday", "Imagine the Possibilities", "One Act, Many Motivations", "Purpose in Relationships", "Pause for Purpose", "Keep Asking Why", "The Little Things", "Eyes on the Horizon", "Purpose in Daily Life", "Growing Through Adversity", "Under Pressure", "Clarifying Your Values", "Core Values", "Values in Your Life", "Applying Values to Life", "Role Models", "Our Most Important Relationship", "Build Yourself Up", "Deepening Relationships", "Walking the Talk", "Leave Your Mark", "Transforming Daily Routines", "Values in Difficult Times", "What Are You Feeding Your Mind?", "Transform Your Mind With Values", "The Experience of Meaning", "A Life of Meaning", "Meaning in the Mundane", "The Meaning of Adversity", "Meaning Here and Now", "Choose Meaning", "Finding Meaning in Difficult Times", "The Art of Meaning", "Every Step Counts", "The World Needs You", "Sharing the Journey", "Changing the World"),
+    c("A Tour of the Senses", "Training Attention", "Mindfulness of Sound", "Directing Attention", "Counting the Breath", "Focus", "Mindful Seeing", "Monitoring the Mind", "Feeling the Breath", "Transforming Distraction", "Mindfulness of Sensations", "Open Awareness", "From Doing to Being", "Relaxing with the Breath", "Relaxing the Mind", "Open Awareness"),
+    c("Stepping Out of the River", "Strengthening Self-Awareness", "Mindfulness of Emotions", "The Self-Awareness Toolkit", "Thoughts, Emotions, and the Breath", "Weather Check", "Self-Regulation", "Stepping Out of the River", "The Wandering Mind", "Mindfulness of Emotions", "The Third Option", "Dealing with Stress", "Thoughts, Emotions, and the Breath", "Exploring Emotion", "Weather Check", "Inner Balance", "Stepping Out of the River"),
+    c("Caring for the Brain", "Counting the Breath", "Dropping Anchor", "Open Awareness", "Healthy Habits: Inspiration", "Mindfulness of Sound", "Relaxing with the Breath", "Healthy Habits: Setting Intentions", "A Tour of the Senses", "Healthy Habits: Taking Action", "Mindful Seeing", "Feeling the Breath", "Healthy Habits: Repetition and Experience", "Mindfulness of Sensations", "Looking Within", "Mindful Breathing"),
+    c("Commuting", "A Moment of Inspiration", "Feeling Stuck", "Intro to Active Meditation", "Interdependence with Nature", "Calm in the Midst of Chaos", "Envisioning Actions", "The Pull of Distraction", "Exercising with Mindfulness", "Sports and Interconnection"),
+    c('Mindfulness for Sleep', 'Fall Asleep with Awareness', 'Wake Up with Awareness', 'Preparing the Mind and Body for Sleep', 'Body Scan for Sleep', 'Calming the Breath for Sleep', 'Calming the Mind for Sleep'),
+    c("A Moment of Inspiration", "Feeling Stuck", "Moment of Rest", "Momentary Overwhelm"),
+    c("Interdependence with Nature", "Sending Self-Compassion", "Wishing Your Loved Ones Well", "Compassion for Strangers", "Compassion for All Beings", "Exploring Emotion", "What Are Thoughts Made Of?", "The Push and Pull of Emotion", "Explore Your Inner Terrain", "Clarity in Uncertain Times", "Lean on Your Values", "Momentary Overwhelm", "Checking in with Yourself", "Calm in the Midst of Chaos", "The World Needs You", "Sharing the Journey", "Change Your Mind, Change the World"),
+    c("Unguided Practice Timer"),
+    c("Giving and Receiving Love", "Embracing Holiday Expectations", "Compassion for Family Stress", "Flourishing Friendships", "Healing Division", "Appreciation for Those We Find Challenging", "Gratitude", "A New Beginning", "Healing Intergenerational Trauma", "Embracing Holiday Expectations", "Free To Be", "Pride in Who We Are"),
+    c("Happiness Is a Skill", "Introduction", "Taming the Monkey Mind", "Cultivate Attention", "Don’t Believe Your Thoughts", "See Through Thoughts and Emotions", "Wise Selfishness", "Compassion", "The Case Against Self-Criticism", "Care and Dignity", "Social Animals", "Grounded Compassion", "Compassion for Jerks", "Compassion for an Annoying Person", "Interconnected", "The Good News About Death", "The Hardest Part Is Remembering"),
+    c("Interdependence with Nature", "Moment of Rest", "The Skill of Mindfulness", "A True Break", "Momentary Overwhelm", "Checking in with Yourself", "Clarity in Uncertain Times", "Dealing with Election Anxiety", "Seeing the Good in Ourselves", "Calm in the Midst of Chaos", "Working with Difficult Emotions during the Holidays", "Facing Financial Stress", "Healing Intergenerational Trauma", "Lean on Your Values", "Sending Breath to Your Body", "Gratitude for Your Body", "The Mind that Craves", "Transforming Physical Pain")
+  )
+)
+```
+
+```{r}
+user_activity_list <- user_activity_list |> left_join(meditation_track, by = c("activity_type" = "track_name"))
+```
+
+remove consecutive duplicates in activity list column of in user_activity_list table
+
+```{r}
+remove_consecutive_duplicates <- function(vec) {
+  vec <- unlist(vec)  # 리스트 내부 벡터로
+  if (length(vec) <= 1) return(vec)
+  vec[c(TRUE, vec[-1] != vec[-length(vec)])]
+}
+
+user_activity_list<-user_activity_list |> 
+  mutate(activity_list = map(activity_list, remove_consecutive_duplicates))
+```
+
+remove "Unguided Practice Timer" activity since it is not included in any track.
+
+```{r}
+user_activity_list<-user_activity_list |> filter(activity_type != "silence")
+```
+
+use Longest Common Subsequence(LCS) to quantify the adherence to track
+
+*The LCS is the logest sequence of elements that appears in the same order (but not necessarily consecutively) in both sequences. It helps measure how well one sequence follows the order of another, which is perfect for comparing a user's activity history to a predefined track.*
+
+example
+
+```{q}
+track = c("A", "B", "C", "D", "E", "F")
+activity_list = c("B", "D", "E", "G")
+
+LCS = c("B", "D", "E")
+LCS length = 3
+Track length = 6
+LCS score = 3/6 = 0.5
+```
+
+make LCS algorithm
+
+```{r}
+get_lcs_length <- function(a, b) {
+  m <- length(a)
+  n <- length(b)
+  dp <- matrix(0, nrow = m + 1, ncol = n + 1)
+
+  for (i in 1:m) {
+    for (j in 1:n) {
+      if (a[i] == b[j]) {
+        dp[i + 1, j + 1] <- dp[i, j] + 1
+      } else {
+        dp[i + 1, j + 1] <- max(dp[i + 1, j], dp[i, j + 1])
+      }
+    }
+  }
+  return(dp[m + 1, n + 1])
+}
+```
+
+### Calculate lcs_score for each user
+
+```{r}
+user_activity_list <- user_activity_list |> rowwise() |> mutate(lcs_length = get_lcs_length(activity_list, track)) |> ungroup()
+
+user_activity_list <- user_activity_list |> mutate(track_len = lengths(track),
+                                                   lcs_score = lcs_length/track_len)
+
+user_activity_list_total <- user_activity_list |> 
+  group_by(user_id) |> 
+  summarise(lcs_score_sum = sum(lcs_score), .groups = "drop") |> ungroup()
+```
+
+### left join user_activity_list_total to data_hist_cln
+
+```{r}
+data_hist_cln <- data_hist_cln |> left_join(user_activity_list_total, by = 'user_id')
+```
+
+### left join data_hist_cln to data_total and save the final dataset
+
+```{r}
+# leave necessary columns (user engagement)
+data_hist_cln_final<-data_hist_cln |> select(c(user_id, days_used,total_elapsed_time, total_session_completed, prac_learn_ratio, cv_daily_elapsed_time, cv_interval, lcs_score_sum))
+```
+
+```{r}
+# drop the duplicated rows
+data_hist_cln_final <- data_hist_cln_final[!duplicated(data_hist_cln_final), ]
+```
+
+```{r}
+# left join to dataset
+data_total_final <- data_total |> left_join(data_hist_cln_final, by='user_id')
+```
+
+```{r}
+# create outcome variable (change of mental wellbeing score t1-t0)
+data_total_final<-data_total_final |> mutate(
+  mental_wellbeing_change = wellbeing_t1_m - wellbeing_t0_m
+)
+```
+
+# make new feature for classification (0 : give up to use app before 4 weeks, 1: keep using the app until 4 weeks)
+
+```{r}
+data_total_final<-data_total_final |> mutate(
+  '4_week_after' = if_else(is.na(wellbeing_t1_m), "no", "yes")
+)
+```
+
+# same but now whether keep use the app after 8 weeks
+```{r}
+data_total_final<-data_total_final |> mutate(
+  '8_week_after' = if_else(is.na(wellbeing_t2_m), "no", "yes")
+)
+```
+
+```{r}
+# save file
+write_csv(data_total_final, 'dataset/data_total_final_ml.csv')
+```
