@@ -85,6 +85,4 @@ The report synthesizes findings from the analyses conducted in `time_engagement.
 The goal of this project is to investigate whether **temporal patterns of practice** are associated with higher engagement in a digital mindfulness intervention, while controlling for demographic factors such as age. Engagement is operationalized using multiple metrics to ensure robustness of results.
 
 
-## 000 part
-
 
