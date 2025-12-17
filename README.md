@@ -2,6 +2,32 @@
 2025 DSHB capstone project 
 Project by : Sadaf Nasir, Peixuan Xu, and Kyoheon Hwang
 
+## Sadaf's Contribution
+
+### 1. Merging Datasets
+(file: hmi_capstone.qmd)
+- Here, I inspected individual datasets and cleaned them as necessary
+to prepare for merging
+- I also derived some key features prior to merging
+
+### 2. Modeling
+(file: hmi_capstone_models)
+- Here, I performed EDA
+- Derived some more key features
+- Ran linear regression models
+- Created data visualizations
+
+### 3. Final Paper
+(file: Nasir_capstone_report.pdf)
+- Contains final report of capstone project
+
+###4. Data files
+(files: perceived_stress_report_new.csv &
+hmi_capstone_data_wide.csv)
+- Contains the specific stress dataset that was used
+- As well as the final merged dataset used in analyses
+
+### The overarching goal of this project is to explore the impact of well-being on engagement of the Healthy Minds Program application.
 ## Kayden's part
 
 ### 1. Data Cleaning
