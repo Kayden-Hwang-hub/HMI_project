@@ -28,6 +28,8 @@ hmi_capstone_data_wide.csv)
 - As well as the final merged dataset used in analyses
 
 ### The overarching goal of this project is to explore the impact of well-being on engagement of the Healthy Minds Program application.
+
+
 ## Kayden's part
 
 ### 1. Data Cleaning
@@ -53,6 +55,8 @@ hmi_capstone_data_wide.csv)
 (file: reg_model_prepost_Ancova.ipynb)
 - main research objective
 - KNN, Rnadom Forest, and MLP modeling for prediction of post intervention mental wellbeing (regression problem)
+
+
 
 ## Peixuan(Nancy)'s part
 
