@@ -1,0 +1,322 @@
+---
+title: "HMI Dataset Creation"
+format: html
+editor: visual
+editor_options:
+  chunk_output_type: console
+---
+
+# Notebook Setup
+
+## Libraries
+
+```{r}
+library(RSQLite)
+library(DBI)
+library(tidyverse)
+library(dplyr)
+library(lubridate)
+library(skimr)
+library(readr)
+library(corrplot, include.only = "corrplot.mixed")
+library(broom)
+library(purrr)
+
+devtools::source_url("https://github.com/jjcurtin/lab_support/blob/main/fun_eda.R?raw=true")
+devtools::source_url("https://github.com/jjcurtin/lab_support/blob/main/fun_plots.R?raw=true")
+devtools::source_url("https://github.com/jjcurtin/lab_support/blob/main/fun_ml.R?raw=true")
+
+path_data <- "hmi"
+```
+
+## Read in data
+
+```{r}
+conn <- dbConnect(RSQLite::SQLite(), "/Users/SadafNasir/Desktop/710/hmi/hmi_database_v2.sqlite")
+
+dbListTables(conn)
+# src_dbi(conn)
+
+# demographic data
+dshb_dem <- dbReadTable(conn, "demographics")
+
+# user history data
+dshb_userhist_v3 <- read_csv("/Users/SadafNasir/Desktop/710/hmi/recleaned_user_history_v3.csv")
+dshb_userhist_v3 <- dshb_userhist_v3 |> 
+  mutate(engage_date = as.POSIXct(completion_date, 
+                                  origin = "1970-01-01", tz = "UTC"))
+dshb_userhist_v3 <- dshb_userhist_v3 |> 
+  mutate(engage_date = as.Date(engage_date)) 
+  # mutate(engage_date = mdy(engage_date))
+```
+
+```{r}
+# baseline acip survey (t0)
+dshb_t0 <- dbGetQuery(conn,sql("SELECT t0_all.user_id, t0_all.completed_date AS date_0, date_0.reformatted_date_t0, t0_all.survey_0, ROUND((awareness_t0_m + connection_t0_m + insight_t0_m + purpose_t0_m)/4, 2) AS avg_hmi_0,
+    ROUND(t0_all.awareness_t0_m, 2) AS awareness_0,
+    ROUND(t0_all.connection_t0_m, 2) AS connection_0,
+    ROUND(t0_all.insight_t0_m, 2) AS insight_0,
+    ROUND(t0_all.purpose_t0_m, 2) AS purpose_0
+    FROM t0_all
+    JOIN date_0 ON t0_all.user_id = date_0.user_id"))
+
+# t1 acip items
+dshb_t1 <- dbGetQuery(conn,sql("SELECT t1_all.user_id, t1_all.completed_date AS date_1, date_1.reformatted_date_t1, t1_all.survey_1, ROUND((awareness_t1_m + connection_t1_m + insight_t1_m + purpose_t1_m)/4, 2) AS avg_hmi_1,
+    ROUND(t1_all.awareness_t1_m, 2) AS awareness_1,
+    ROUND(t1_all.connection_t1_m, 2) AS connection_1,
+    ROUND(t1_all.insight_t1_m, 2) AS insight_1,
+    ROUND(t1_all.purpose_t1_m, 2) AS purpose_1
+    FROM t1_all
+    JOIN date_1 ON t1_all.user_id = date_1.user_id"))
+
+# t2 acip items
+dshb_t2 <- dbGetQuery(conn,sql("SELECT t2_all.user_id, t2_all.completed_date AS date_2, date_2.reformatted_date_t2, t2_all.survey_2, ROUND((awareness_t2_m + connection_t2_m + insight_t2_m + purpose_t2_m)/4, 2) AS avg_hmi_2,
+    ROUND(t2_all.awareness_t2_m, 2) AS awareness_2,
+    ROUND(t2_all.connection_t2_m, 2) AS connection_2,
+    ROUND(t2_all.insight_t2_m, 2) AS insight_2,
+    ROUND(t2_all.purpose_t2_m, 2) AS purpose_2
+    FROM t2_all
+    JOIN date_2 ON t2_all.user_id = date_2.user_id"))
+```
+
+```{r}
+# new stress scale data
+new_stress <- read_csv(here::here(path_data, "perceived_stress_report_new.csv"), show_col_types = FALSE) |> janitor::clean_names()
+
+glimpse(new_stress)
+```
+
+# Data cleaning
+
+## Check data
+
+```{r}
+# glimpse() allows us to check data types and confirm data were read in properly
+glimpse(dshb_dem)
+glimpse(new_stress)
+glimpse(dshb_userhist_v3)
+glimpse(dshb_t0)
+glimpse(dshb_t1)
+glimpse(dshb_t2)
+```
+
+```{r}
+# check data distributions, missingness, unique responses in non-numeric variables, & basic descriptive statistics
+skim(dshb_dem)
+skim(new_stress)
+skim(dshb_userhist_v3)
+skim(dshb_t0)
+skim(dshb_t1)
+skim(dshb_t2)
+```
+
+```{r}
+# cleaning new_stress columns
+
+# Remove specified columns - not needed for analysis
+new_stress <- new_stress %>% select(-survey_id, -cohort_id, -cohort_name, -participant_id, -activity_id, -task_id, -activity_name, -score_category, -raw_score, -percentile_score, -x24, -completed_time)
+
+# Removes rows with missing values.
+new_stress <- new_stress %>%
+  filter(complete.cases(.))
+
+# Check data to confirm this step was done correctly
+skim(new_stress)
+```
+
+```{r}
+# Rename columns according to sql database names
+new_stress <- new_stress %>%
+  rename(
+    unable_to_cope = `in_the_past_month_how_often_have_you_found_that_you_could_not_cope_with_all_the_things_that_you_had_to_do`,
+    unable_to_control = `in_the_past_month_how_often_have_you_felt_that_you_were_unable_to_control_the_important_things_in_your_life`,
+    control_irritations = `in_the_past_month_how_often_have_you_been_able_to_control_irritations_in_your_life`,
+    angered_things = `in_the_past_month_how_often_have_you_been_angered_because_of_things_that_happened_that_were_outside_of_your_control`,
+    upset_unexpected = `in_the_past_month_how_often_have_you_been_upset_because_of_something_that_happened_unexpectedly`,
+    confidence_handle_problems = `in_the_past_month_how_often_have_you_felt_confident_about_your_ability_to_handle_your_personal_problems`,
+    overwhelmed_difficulties = `in_the_past_month_how_often_have_you_felt_difficulties_were_piling_up_so_high_that_you_could_not_overcome_them`,
+    nervous_stressed = `in_the_past_month_how_often_have_you_felt_nervous_and_stressed`,
+    things_going_way = `in_the_past_month_how_often_have_you_felt_that_things_were_going_your_way`,
+    on_top_of_things = `in_the_past_month_how_often_have_you_felt_that_you_were_on_top_of_things`
+  )
+```
+
+```{r}
+# reformat date column & remove original date column
+new_stress <- new_stress %>% 
+  mutate(new_stress_date = as.Date(completed_date, format = "%m/%d/%Y")) %>% 
+  select(-completed_date)
+```
+
+```{r}
+# includes completed activity status
+user_practice_counts <- dshb_userhist_v3 %>%
+  filter(activity_status == "Completed") %>%
+  group_by(user_id) %>%
+  summarize(
+    n_sessions = n(),  # number of completed activities
+    first_session = min(engage_date, na.rm = TRUE),
+    last_session = max(engage_date, na.rm = TRUE),
+    active_days = n_distinct(engage_date),
+    duration_days = as.numeric(max(engage_date, na.rm = TRUE) - min(engage_date, na.rm = TRUE))
+  )
+```
+
+```{r}
+# factor stress scale & demographics
+dshb_dem <- dshb_dem %>%
+mutate(across(where(is.character), as.factor)) %>%
+glimpse()
+
+new_stress <- new_stress %>% 
+  mutate(across(where(is.character), as.factor)) %>% 
+  glimpse()
+```
+
+```{r}
+# make new_stress responses numeric, including reverse coded items
+new_stress <- new_stress |> mutate(
+  control_irritations = case_match(control_irritations,
+                                   "Never" ~ 4,
+                                   "Almost Never" ~ 3,
+                                   "Sometimes" ~ 2,
+                                   "Fairly Often" ~ 1,
+                                   "Very Often" ~ 0),
+  angered_things = case_match(angered_things,
+                                       "Never" ~ 0,
+                                       "Almost Never" ~ 1,
+                                       "Sometimes" ~ 2,
+                                       "Fairly Often" ~ 3,
+                                       "Very Often" ~ 4),
+  upset_unexpected = case_match(upset_unexpected,
+                                "Never" ~ 0,
+                                "Almost Never" ~ 1,
+                                "Sometimes" ~ 2,
+                                "Fairly Often" ~ 3,
+                                "Very Often" ~ 4),
+  confidence_handle_problems = case_match(confidence_handle_problems, 
+                                "Never" ~ 4,
+                                "Almost Never" ~ 3,
+                                "Sometimes" ~ 2,
+                                "Fairly Often" ~ 1,
+                                "Very Often" ~ 0),
+  overwhelmed_difficulties = case_match(overwhelmed_difficulties, 
+                                "Never" ~ 0,
+                                "Almost Never" ~ 1,
+                                "Sometimes" ~ 2,
+                                "Fairly Often" ~ 3,
+                                "Very Often" ~ 4),
+  nervous_stressed = case_match(nervous_stressed, 
+                                "Never" ~ 0,
+                                "Almost Never" ~ 1,
+                                "Sometimes" ~ 2,
+                                "Fairly Often" ~ 3,
+                                "Very Often" ~ 4),
+  things_going_way = case_match(things_going_way, 
+                                "Never" ~ 4,
+                                "Almost Never" ~ 3,
+                                "Sometimes" ~ 2,
+                                "Fairly Often" ~ 1,
+                                "Very Often" ~ 0),
+  on_top_of_things = case_match(on_top_of_things, 
+                                "Never" ~ 4,
+                                "Almost Never" ~ 3,
+                                "Sometimes" ~ 2,
+                                "Fairly Often" ~ 1,
+                                "Very Often" ~ 0),
+  unable_to_control = case_match(unable_to_control, 
+                                "Never" ~ 0,
+                                "Almost Never" ~ 1,
+                                "Sometimes" ~ 2,
+                                "Fairly Often" ~ 3,
+                                "Very Often" ~ 4),
+  unable_to_cope = case_match(unable_to_cope, 
+                                "Never" ~ 0,
+                                "Almost Never" ~ 1,
+                                "Sometimes" ~ 2,
+                                "Fairly Often" ~ 3,
+                                "Very Often" ~ 4))
+```
+
+```{r}
+# grouping demographic variables
+demographic_vars <- c("user_id", "education", "age", "relationship", "why_use_app",
+                      "pre_meditation_habit_length", "pre_meditation_session_length",
+                      "pre_meditation_frequency", "gender", "race")
+
+dshb_dem <- dshb_dem %>%
+  select(all_of(demographic_vars))
+```
+
+
+```{r}
+# how many duplicate rows in new_stress
+duplicates_full <- new_stress %>%
+  duplicated()  # returns TRUE for duplicate rows
+
+sum(duplicates_full)
+```
+
+181,356 rows in new_stress after running above chunk
+
+```{r}
+#remove duplicates: duplicate = same user_id & new_stress_date
+new_stress <- new_stress %>%
+  distinct(user_id, new_stress_date, .keep_all = TRUE)
+```
+
+181,268 rows in new_stress after running above chunk
+
+```{r}
+# create one averaged stres score per user
+new_stress_avg <- new_stress %>%
+  rowwise() %>%
+  mutate(
+    stress_composite = mean(
+      c(
+        control_irritations,
+        angered_things,
+        upset_unexpected,
+        confidence_handle_problems,
+        overwhelmed_difficulties,
+        nervous_stressed,
+        things_going_way,
+        on_top_of_things,
+        unable_to_control,
+        unable_to_cope
+      ),
+      na.rm = TRUE
+    )
+  ) %>%
+  ungroup() %>%
+  group_by(user_id) %>%
+  summarize(
+    stress_avg = mean(stress_composite, na.rm = TRUE),
+    n_stress_surveys = n()   # number of surveys contributing
+  ) %>%
+  ungroup()
+```
+
+# Data Merging
+
+```{r}
+t012 <- reduce(list(dshb_t0, dshb_t1, dshb_t2), full_join, by = "user_id")
+```
+
+```{r}
+t012 <- t012 %>% 
+  select(-survey_0, -survey_1, -survey_2, -date_0, -date_1, -date_2)
+```
+
+
+```{r}
+data_merge <- dshb_dem %>%
+  full_join(new_stress_avg, by = "user_id") %>%
+  full_join(user_practice_counts, by = "user_id") %>%
+  full_join(t012, by = "user_id") %>%
+  arrange(user_id)
+```
+
+```{r}
+readr::write_csv(data_merge, "hmi_capstone_data_wide.csv")
+```

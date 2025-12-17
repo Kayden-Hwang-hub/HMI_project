@@ -1,0 +1,537 @@
+---
+title: "HMI Capstone Model Building"
+format: html
+editor: visual
+editor_options:
+  chunk_output_type: console
+---
+
+# Notebook Setup
+
+## libraries
+
+```{r}
+library(RSQLite)
+library(DBI)
+library(tidyverse)
+library(dplyr)
+library(lubridate)
+library(skimr)
+library(readr)
+library(cowplot, include.only = c("plot_grid", "theme_half_open"))
+library(corrplot, include.only = "corrplot.mixed")
+library(broom)
+library(purrr)
+
+devtools::source_url("https://github.com/jjcurtin/lab_support/blob/main/fun_eda.R?raw=true")
+devtools::source_url("https://github.com/jjcurtin/lab_support/blob/main/fun_plots.R?raw=true")
+devtools::source_url("https://github.com/jjcurtin/lab_support/blob/main/fun_ml.R?raw=true")
+
+path_data <- "~/Desktop/710/hmi"
+```
+
+## read in data
+
+```{r}
+data <- read_csv(here::here(path_data, "hmi_capstone_data_wide.csv"), show_col_types = FALSE) |> janitor::clean_names()
+
+glimpse(data)
+```
+
+# EDA 
+
+```{r}
+skim(data)
+```
+
+```{r}
+skim(data$age)
+```
+
+```{r}
+skim(data$race)
+```
+
+```{r}
+skim(data$gender)
+```
+
+```{r}
+skim(data$n_sessions)
+```
+
+
+```{r}
+data <- data %>% 
+  mutate(across(where(is.character), as.factor)) %>% 
+  glimpse()
+```
+
+## Univariate EDA
+
+```{r}
+# edit bar plot function to match HMI's color scheme
+plot_bar <- function(df, x){
+  x_label_size <- if_else(skimr::n_unique(df[[x]]) < 7, 12, 9)
+  
+  df |>
+    ggplot(aes(x = .data[[x]])) +
+    geom_bar(fill = "#363B7F", color = "#56FDD2") +
+    theme(
+      axis.text.x = element_text(
+        angle = 90,
+        size = x_label_size,
+        vjust = 0.5, hjust = 1
+      ),
+      axis.text.y = element_text(size = 11)
+    )
+}
+```
+
+```{r}
+data |> plot_bar("education")
+data |> plot_bar("age")
+data |> plot_bar("relationship")
+data |> plot_bar("why_use_app")
+data |> plot_bar("pre_meditation_habit_length")
+data |> plot_bar("pre_meditation_session_length")
+data |> plot_bar("pre_meditation_frequency")
+data |> plot_bar("gender")
+data |> plot_bar("race")
+```
+
+```{r}
+# table of education response counts & proportions
+data |> 
+  filter(!is.na(education)) |> 
+  tab(education, sort = TRUE)
+```
+
+```{r}
+data |> 
+  filter(!is.na(age)) |> 
+  tab(age, sort = TRUE)
+```
+
+```{r}
+data |> 
+  filter(!is.na(relationship)) |> 
+  tab(relationship, sort = TRUE)
+```
+
+```{r}
+data |> 
+  filter(!is.na(gender)) |> 
+  tab(gender, sort = TRUE)
+```
+
+```{r}
+data |> 
+  filter(!is.na(race)) |> 
+  tab(race, sort = TRUE)
+```
+
+```{r}
+plot_box_violin <- function(df, x){
+  x_label_size <- if_else(skimr::n_unique(df[[x]]) < 7, 11, 7)
+  
+  df |>
+    ggplot(aes(x = .data[[x]])) +
+    geom_violin(aes(y = 0), fill = "#56FDD2", color = "#363B7F") +
+    geom_boxplot(width = .1, fill = NA, lwd = 1.1, fatten = 1.1) +
+    theme(axis.text.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.title.y = element_blank(),
+          axis.text.x = element_text(angle = 90, size = x_label_size, vjust = 0.5, hjust = 1))
+}
+```
+
+```{r}
+data |> plot_box_violin("stress_avg") #normally distributed
+data |> plot_box_violin("n_sessions")
+data |> plot_box_violin("active_days")
+data |> plot_box_violin("duration_days") # funky outliers
+data |> plot_box_violin("avg_hmi_0")
+data |> plot_box_violin("avg_hmi_1") 
+data |> plot_box_violin("avg_hmi_2") 
+```
+
+```{r}
+# exploration of outliers
+data |> 
+  filter(duration_days > 6000) |>
+  pull(duration_days)
+```
+
+```{r}
+# to visualize the main portion of the distribution for this column
+data |> 
+  filter(duration_days < 6000) |> 
+  plot_box_violin("duration_days")
+```
+
+```{r}
+# exploration of outliers
+data |> 
+  filter(n_sessions > 400) |>
+  pull(n_sessions)
+```
+
+```{r}
+n_sessions_outliers <- data |> 
+  filter(n_sessions > 400)
+```
+
+There are some obvious outliers here. However, I'm choosing to leave them in my datset because the outlying observations seems to come from two individuals, which is practically nothing compared to my sample of 409,088 users. Leaving them in should not affect my model's performance.
+
+```{r}
+hmi_long <- data %>%
+  select(avg_hmi_0, avg_hmi_1, avg_hmi_2) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "timepoint",
+    values_to = "avg_hmi"
+  ) %>%
+  filter(!is.na(avg_hmi)) %>%
+  mutate(
+    timepoint = factor(
+      timepoint,
+      levels = c("avg_hmi_0", "avg_hmi_1", "avg_hmi_2"),
+      labels = c("T0", "T1", "T2")
+    )
+  )
+```
+
+```{r}
+ggplot(hmi_long, aes(x = avg_hmi, color = timepoint, fill = timepoint)) +
+  geom_density(alpha = 0.32, linewidth = 1.2) +
+  scale_x_continuous(limits = c(1, 5), breaks = 1:5) +
+  scale_color_manual(
+    values = c(
+      "T0" = "#363B7F",  # purple
+      "T1" = "#FF7A90",  # coral
+      "T2" = "#5DFDD2"   # aqua
+    )
+  ) +
+  scale_fill_manual(
+    values = c(
+      "T0" = "#363B7F",
+      "T1" = "#FF7A90",
+      "T2" = "#5DFDD2"
+    )
+  ) +
+  labs(
+    x = "Average Well-Being / HMI Score",
+    y = "Density",
+    color = "Time Point",
+    fill  = "Time Point"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "top",
+    legend.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+```
+
+
+```{r}
+# bar plots work better here, since there is a finite number of possible responses to ACIP scores
+data |> plot_bar("awareness_0")
+data |> plot_bar("awareness_1")
+data |> plot_bar("awareness_2")
+data |> plot_bar("connection_0")
+data |> plot_bar("connection_1")
+data |> plot_bar("connection_2")
+data |> plot_bar("insight_0")
+data |> plot_bar("insight_1")
+data |> plot_bar("insight_2")
+data |> plot_bar("purpose_0")
+data |> plot_bar("purpose_1")
+data |> plot_bar("purpose_2")
+```
+
+ACIP responses seem to be normally distributed. Bar plots are a much better way of visualizing these columns.
+
+## Bivariate EDA
+
+```{r}
+data |> plot_scatter("avg_hmi_0", "n_sessions")
+```
+
+```{r}
+data |> plot_scatter("avg_hmi_1", "n_sessions")
+```
+
+```{r}
+data |> plot_scatter("avg_hmi_2", "n_sessions")
+```
+
+### Correlation Plot
+
+```{r}
+data |> 
+  select(where(is.numeric)) |> 
+  cor(use = "pairwise.complete.obs") |> 
+  corrplot::corrplot.mixed()
+```
+
+This plot shows very weak correlations between ACIP variables & n_sessions. It does appear that the correlation between ACIP scores and n_sessions get slightly stronger as we progress through the time points (i.e. t1 correlates stronger with n_sessions than t0, and t2 shows stronger correlation with n_sessions than t1). I will carry on to model buidling to see if I can uncover any insights.
+
+# Deriving Features
+
+## Create a Change Score
+
+#### Change Scores for ACIP
+
+```{r}
+data <- data |> 
+  mutate(
+    awareness_1_0 = awareness_1 - awareness_0,
+    awareness_2_1 = awareness_2 - awareness_1,
+    awareness_2_0 = awareness_2 - awareness_0,
+
+    connection_1_0 = connection_1 - connection_0,
+    connection_2_1 = connection_2 - connection_1,
+    connection_2_0 = connection_2 - connection_0,
+
+    insight_1_0 = insight_1 - insight_0,
+    insight_2_1 = insight_2 - insight_1,
+    insight_2_0 = insight_2 - insight_0,
+
+    purpose_1_0 = purpose_1 - purpose_0,
+    purpose_2_1 = purpose_2 - purpose_1,
+    purpose_2_0 = purpose_2 - purpose_0
+  )
+```
+
+### Change Scores for ACIP Average
+
+```{r}
+data <- data |> 
+  mutate(
+    avg_hmi_1_0 = avg_hmi_1 - avg_hmi_0,
+    avg_hmi_2_1 = avg_hmi_2 - avg_hmi_1,
+    avg_hmi_2_0 = avg_hmi_2 - avg_hmi_0
+  )
+```
+
+## Center Numeric Variables
+
+```{r}
+data <- data %>% 
+  mutate(avg_hmi_1_0_c = avg_hmi_1_0 - mean(avg_hmi_1_0, na.rm = TRUE)) %>% 
+  mutate(avg_hmi_2_1_c = avg_hmi_2_1 - mean(avg_hmi_2_1, na.rm = TRUE)) %>% 
+  mutate(avg_hmi_2_0_c = avg_hmi_2_0 - mean(avg_hmi_2_0, na.rm = TRUE)) %>%
+  mutate(awareness_1_0_c = awareness_1_0 - mean(awareness_1_0, na.rm = TRUE)) %>% 
+  mutate(awareness_2_1_c = awareness_2_1 - mean(awareness_2_1, na.rm = TRUE)) %>%
+  mutate(awareness_2_0_c = awareness_2_0 - mean(awareness_2_0, na.rm = TRUE)) %>%
+  mutate(connection_1_0_c = connection_1_0 - mean(connection_1_0, na.rm = TRUE)) %>%
+  mutate(connection_2_1_c = connection_2_1 - mean(connection_2_1, na.rm = TRUE)) %>%
+  mutate(connection_2_0_c = connection_2_0 - mean(connection_2_0, na.rm = TRUE)) %>%
+  mutate(insight_1_0_c = insight_1_0 - mean(insight_1_0, na.rm = TRUE)) %>%
+  mutate(insight_2_1_c = insight_2_1 - mean(insight_2_1, na.rm = TRUE)) %>%
+  mutate(insight_2_0_c = insight_2_0 - mean(insight_2_0, na.rm = TRUE)) %>%
+  mutate(purpose_1_0_c = purpose_1_0 - mean(purpose_1_0, na.rm = TRUE)) %>%
+  mutate(purpose_2_1_c = purpose_2_1 - mean(purpose_2_1, na.rm = TRUE)) %>%
+  mutate(purpose_2_0_c = purpose_2_0 - mean(purpose_2_0, na.rm = TRUE)) %>%
+  mutate(stress_avg_c = stress_avg - mean(stress_avg, na.rm = TRUE))
+
+```
+
+# Model Building
+
+## Additive models w/ ACIP & stress
+
+```{r}
+# additive model w/ individual ACIP change scores
+m_01 <- lm(n_sessions ~ awareness_1_0_c + connection_1_0_c + insight_1_0_c + purpose_1_0_c + stress_avg_c, data = data)
+summary(m_01)
+```
+
+Summary of m_01 All parameter estimates signficant at the p \< .001 level Multiple R2 = 2.24% Adjusted R2 = 2.22%
+
+```{r}
+m_02 <- lm(n_sessions ~ awareness_2_1_c + connection_2_1_c + insight_2_1_c + purpose_2_1_c + stress_avg_c, data = data)
+summary(m_02)
+```
+
+Summary of m_02
+
+Intercept significant at p \< .05 awareness_2_1_c & insight_2_1_c are significant at the p \<.05 level connection_2_1_c & stress_avg_c signficant at p \< .001 purpose_2_1_c nonsignificant R2 = 1.3%
+
+```{r}
+m_03 <- lm(n_sessions ~ awareness_2_0_c + connection_2_0_c + insight_2_1_c + purpose_2_0_c + stress_avg_c, data = data)
+summary(m_03)
+```
+
+Summary of m_03
+
+Intercept, awareness_2_0_c, connection_2_0_c, purpose_2_0_c, stress_avg_c significant at p \< .001 insight_2_0_c nonsignificant R2 = 03%
+
+## Interaction models (well_being*stress)
+
+```{r}
+# interaction model for t1 - t0
+m_04 <- lm(n_sessions ~ avg_hmi_1_0_c * stress_avg_c, data = data)
+summary(m_04)
+```
+
+```{r}
+# interaction model for t2 - t1
+m_05 <- lm(n_sessions ~ avg_hmi_2_1_c * stress_avg_c, data = data)
+summary(m_05)
+```
+
+these are the results, they were the same ish after adding in demographics
+
+```{r}
+# interaction model for t2 - t0
+m_06 <- lm(n_sessions ~ avg_hmi_2_0_c * stress_avg_c, data = data)
+summary(m_06)
+```
+
+Interaction model 1: n_sessions \~ avg_hmi_1_0 \* stress_avg_c - all parameter estimates significant (p \< 0.05), sig. interaction, 02% R\^2
+
+Interaction model 2: n_sessions \~ avg_hmi_2_1 \* stress_avg_c - nonsignficant interaction, all other PEs significant, 01% R\^2
+
+Interaction model 3: n_sessions \~ avg_hmi_2_0 \* stress_avg_c - all PEs significant, including significant interaction term, 03% R\^2
+
+## Adding in Demographic Variables
+
+```{r}
+# interaction model w demo for t1 - t0
+m_07 <- lm(n_sessions ~ avg_hmi_1_0_c * stress_avg_c + age + gender + race, data = data)
+summary(m_07)
+```
+
+Summary of m_07
+
+all age parameter estimates, stress_avg_c, avg_hmi_1_0_c, intercept, & male group signficant at p \< .001. Interction term significant at p \< ,05 level. All race groups nonsignificant. R2 = 2.6 - 2.7%.
+
+```{r}
+# interaction model w demo for t2 - t1
+m_08 <- lm(n_sessions ~ avg_hmi_2_1_c * stress_avg_c + age + gender + race, data = data)
+summary(m_08)
+```
+
+Summary of m_08
+
+```{r}
+# interaction model w demo for t2 - t0
+m_09 <- lm(n_sessions ~ avg_hmi_2_0_c * stress_avg_c + age + gender + race, data = data)
+summary(m_09)
+```
+
+# Data Visualization
+
+```{r}
+# Fit the model
+m_graph <- lm(
+  n_sessions ~ avg_hmi_2_0 * stress_avg + age + gender + race,
+  data = data
+)
+
+# Get useful summaries for the continuous predictors
+stress_mean <- mean(data$stress_avg, na.rm = TRUE)
+stress_sd   <- sd(data$stress_avg,   na.rm = TRUE)
+
+hmi_min <- min(data$avg_hmi_2_0, na.rm = TRUE)
+hmi_max <- max(data$avg_hmi_2_0, na.rm = TRUE)
+
+hmi_seq <- seq(from = hmi_min, to = hmi_max, length.out = 100)
+
+# Start the prediction grid with focal predictors
+
+d_graph <- expand_grid(
+  avg_hmi_2_0 = hmi_seq,
+  stress_avg  = c(stress_mean - stress_sd, stress_mean + stress_sd)
+)
+
+# Add covariates held constant (reference values)
+
+# Age
+if (!is.null(m_graph$xlevels$age)) {
+  # age was treated as factor in the model
+  age_levels <- m_graph$xlevels$age
+  d_graph$age <- factor(
+    rep(age_levels[1], nrow(d_graph)),
+    levels = age_levels
+  )
+} else {
+  # age was numeric in the model
+  d_graph$age <- mean(data$age, na.rm = TRUE)
+}
+
+# Gender
+if (!is.null(m_graph$xlevels$gender)) {
+  gender_levels <- m_graph$xlevels$gender
+  d_graph$gender <- factor(
+    rep(gender_levels[1], nrow(d_graph)),
+    levels = gender_levels
+  )
+} else {
+  d_graph$gender <- rep(unique(data$gender)[1], nrow(d_graph))
+}
+
+# Race
+if (!is.null(m_graph$xlevels$race)) {
+  race_levels <- m_graph$xlevels$race
+  d_graph$race <- factor(
+    rep(race_levels[1], nrow(d_graph)),
+    levels = race_levels
+  )
+} else {
+  d_graph$race <- rep(unique(data$race)[1], nrow(d_graph))
+}
+
+# Predictions (95% CI)
+preds <- predict(m_graph, newdata = d_graph, se.fit = TRUE) |>
+  as_tibble() |>
+  mutate(
+    upper = fit + 1.96 * se.fit,
+    lower = fit - 1.96 * se.fit
+  ) |>
+  bind_cols(d_graph)
+
+# Label the stress lines (-1 SD vs +1 SD)
+preds <- preds |>
+  mutate(
+    stress_lab = factor(
+      stress_avg,
+      levels = c(stress_mean - stress_sd, stress_mean + stress_sd),
+      labels = c("-1 SD Stress", "+1 SD Stress")
+    )
+  )
+
+# Plot
+ggplot() +
+  geom_smooth(
+    data = preds,
+    stat = "identity",
+    aes(
+      x = avg_hmi_2_0,
+      y = fit,
+      ymin = lower,
+      ymax = upper,
+      color = stress_lab,
+      fill = stress_lab,
+      linetype = stress_lab
+    )
+  ) +
+  labs(
+    x = "Change in Average Well-Being/HMI",
+    y = "Predicted Number of Sessions",
+    color = "Stress",
+    fill  = "Stress",
+    linetype = "Stress",
+    title = "Interaction of Change in Average Well-Being and Stress on Engagement\n(Adjusted for Age, Gender, Race)"
+  ) +
+  scale_color_manual(values = c("-1 SD Stress" = "#56FDD2", "+1 SD Stress" = "#363B7F")) +
+  scale_fill_manual(values  = c("-1 SD Stress" = "#56FDD2", "+1 SD Stress" = "#363B7f")) +
+  scale_linetype_manual(values = c("-1 SD Stress" = "dashed", "+1 SD Stress" = "solid")) +
+  scale_x_continuous(expand = c(0,0), limits = c(0, NA)) +
+  scale_y_continuous(expand = c(0,0), limits = c(0, NA))
+
+```
